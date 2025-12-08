@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  geo-guess-online:
+    build: .
+    container_name: geo-guess-online
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
