@@ -20,7 +20,7 @@ const CONFIG = {
     MAX_POINTS_PER_ROUND: 5000,
     TIME_PER_ROUND: 120,
     MIN_PLAYERS: 2,
-    MAX_PLAYERS: 4
+    MAX_PLAYERS: 10
 };
 
 // Áreas de las ciudades para generar ubicaciones aleatorias
