@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 const path = require('path');
 
 const app = express();
@@ -70,13 +71,19 @@ class Room {
 
     generateLocations() {
         this.roundLocations = [];
+        let cityPool = shuffleArray([...CITIES]);
+
         for (let i = 0; i < CONFIG.ROUNDS_PER_GAME; i++) {
-            const city = CITIES[Math.floor(Math.random() * CITIES.length)];
+            if (cityPool.length === 0) {
+                cityPool = shuffleArray([...CITIES]);
+            }
+
+            const city = cityPool.pop();
             const area = CITY_AREAS[city];
             this.roundLocations.push({
                 city: city,
-                lat: area.minLat + Math.random() * (area.maxLat - area.minLat),
-                lng: area.minLng + Math.random() * (area.maxLng - area.minLng)
+                lat: randomInRange(area.minLat, area.maxLat),
+                lng: randomInRange(area.minLng, area.maxLng)
             });
         }
     }
@@ -134,8 +141,10 @@ class Room {
 
     calculatePoints(distance) {
         if (distance === Infinity || isNaN(distance)) return 0;
-        const points = CONFIG.MAX_POINTS_PER_ROUND * Math.exp(-0.5 * distance);
-        return Math.round(Math.max(0, points));
+
+        const distancePenalty = Math.exp(-0.35 * distance);
+        const points = CONFIG.MAX_POINTS_PER_ROUND * distancePenalty;
+        return Math.round(Math.max(0, Math.min(CONFIG.MAX_POINTS_PER_ROUND, points)));
     }
 
     getRoundResults() {
@@ -150,9 +159,39 @@ class Room {
     }
 
     getFinalResults() {
+        const aggregated = this.aggregatePlayerStats();
+
         return this.players
-            .map(p => ({ id: p.id, name: p.name, score: p.score }))
-            .sort((a, b) => b.score - a.score);
+            .map(p => ({
+                id: p.id,
+                name: p.name,
+                score: p.score,
+                totalDistance: aggregated.get(p.id)?.totalDistance ?? Infinity,
+                fastestGuess: aggregated.get(p.id)?.fastestGuess ?? Infinity
+            }))
+            .sort((a, b) => {
+                if (b.score !== a.score) return b.score - a.score;
+                if (a.totalDistance !== b.totalDistance) return a.totalDistance - b.totalDistance;
+                if (a.fastestGuess !== b.fastestGuess) return a.fastestGuess - b.fastestGuess;
+                return a.name.localeCompare(b.name);
+            });
+    }
+
+    aggregatePlayerStats() {
+        const totals = new Map();
+
+        this.roundResults.forEach(roundMap => {
+            roundMap.forEach((result, playerId) => {
+                const current = totals.get(playerId) || { totalDistance: 0, fastestGuess: Infinity };
+                current.totalDistance += Number.isFinite(result.distance) ? result.distance : 0;
+                if (result.timestamp && result.timestamp < current.fastestGuess) {
+                    current.fastestGuess = result.timestamp;
+                }
+                totals.set(playerId, current);
+            });
+        });
+
+        return totals;
     }
 
     toJSON() {
@@ -178,10 +217,29 @@ class Room {
 function generateRoomCode() {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let code = '';
-    for (let i = 0; i < 6; i++) {
-        code += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
+
+    do {
+        code = '';
+        for (let i = 0; i < 6; i++) {
+            const idx = crypto.randomInt(0, chars.length);
+            code += chars.charAt(idx);
+        }
+    } while (rooms.has(code));
+
     return code;
+}
+
+function randomInRange(min, max) {
+    const fraction = crypto.randomBytes(4).readUInt32BE(0) / 0xFFFFFFFF;
+    return min + fraction * (max - min);
+}
+
+function shuffleArray(array) {
+    for (let i = array.length - 1; i > 0; i--) {
+        const j = crypto.randomInt(0, i + 1);
+        [array[i], array[j]] = [array[j], array[i]];
+    }
+    return array;
 }
 
 // ============================================
@@ -397,6 +455,7 @@ function handleSubmitGuess(playerId, message) {
         actualLat, actualLng
     );
     const points = room.calculatePoints(distance);
+    const timestamp = Date.now();
 
     // Registrar resultado
     if (!room.roundResults.has(room.currentRound)) {
@@ -404,7 +463,9 @@ function handleSubmitGuess(playerId, message) {
     }
     room.roundResults.get(room.currentRound).set(playerId, {
         guess: { lat: message.lat, lng: message.lng },
-        distance, points
+        distance,
+        points,
+        timestamp
     });
 
     player.score += points;
@@ -446,7 +507,8 @@ function handleTimeOut(playerId) {
         room.roundResults.get(room.currentRound).set(playerId, {
             guess: null,
             distance: Infinity,
-            points: 0
+            points: 0,
+            timestamp: Date.now()
         });
 
         sendToPlayer(player, {
@@ -476,16 +538,21 @@ function checkRoundComplete(room) {
 
     // Todos adivinaron - mostrar resultados de la ronda
     const roundResults = room.players.map(p => {
-        const result = roundMap.get(p.id) || { distance: Infinity, points: 0 };
+        const result = roundMap.get(p.id) || { distance: Infinity, points: 0, timestamp: Infinity };
         return {
             id: p.id,
             name: p.name,
             distance: result.distance,
             points: result.points,
             guess: result.guess,
-            totalScore: p.score
+            totalScore: p.score,
+            timestamp: result.timestamp
         };
-    }).sort((a, b) => a.distance - b.distance);
+    }).sort((a, b) => {
+        if (b.points !== a.points) return b.points - a.points;
+        if (a.distance !== b.distance) return a.distance - b.distance;
+        return a.timestamp - b.timestamp;
+    }).map((result, index) => ({ ...result, rank: index + 1 }));
 
     broadcastToRoom(room, {
         type: 'roundComplete',
@@ -536,8 +603,9 @@ function handleDisconnect(playerId) {
 
     const room = rooms.get(player.roomCode);
     if (room) {
+        const wasHost = room.hostId === playerId;
         room.removePlayer(playerId);
-        
+
         if (room.players.length === 0) {
             rooms.delete(room.code);
             console.log(`Sala ${room.code} eliminada (vacía)`);
@@ -548,6 +616,17 @@ function handleDisconnect(playerId) {
                 playerName: player.name,
                 room: room.toJSON()
             });
+
+            if (wasHost && room.hostId) {
+                broadcastToRoom(room, {
+                    type: 'hostChanged',
+                    hostId: room.hostId
+                });
+            }
+
+            if (room.state === 'playing') {
+                checkRoundComplete(room);
+            }
         }
     }
 
