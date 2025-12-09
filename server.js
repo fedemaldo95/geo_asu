@@ -19,8 +19,7 @@ const CONFIG = {
     ROUNDS_PER_GAME: 5,
     MAX_POINTS_PER_ROUND: 5000,
     TIME_PER_ROUND: 120,
-    MIN_PLAYERS: 2,
-    MAX_PLAYERS: 4
+    MIN_PLAYERS: 2
 };
 
 // Áreas de las ciudades para generar ubicaciones aleatorias
@@ -52,9 +51,8 @@ class Room {
     }
 
     addPlayer(player) {
-        if (this.players.length >= CONFIG.MAX_PLAYERS) return false;
         if (this.state !== 'waiting') return false;
-        
+
         this.players.push(player);
         if (this.players.length === 1) {
             this.hostId = player.id;
@@ -346,11 +344,6 @@ function handleJoinRoom(ws, playerId, message) {
 
     if (room.state !== 'waiting') {
         ws.send(JSON.stringify({ type: 'error', message: 'La partida ya comenzó' }));
-        return;
-    }
-
-    if (room.players.length >= CONFIG.MAX_PLAYERS) {
-        ws.send(JSON.stringify({ type: 'error', message: 'Sala llena' }));
         return;
     }
 
